@@ -140,14 +140,28 @@ OUTPUT: Respond ONLY with the JSON. No markdown fences. No explanation. Start di
 
 // ─── Route handler ────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
+  // Production Safety: Check for API Key early
+  if (!process.env.GROQ_API_KEY || process.env.GROQ_API_KEY.startsWith('your_')) {
+    console.error('[VOYRA] GROQ_API_KEY is missing or invalid in environment variables.')
+    return new Response(
+      JSON.stringify({ error: 'Server configuration error', detail: 'GROQ_API_KEY is not set on the server.' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    )
+  }
+
   // Auth check — we fetch userId to log usage or personalize if they are signed in.
   // But we DO NOT block generation if they are unauthenticated (guests can try it free).
   const clerkKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
   const hasClerk = clerkKey && !clerkKey.startsWith('your_')
   let userId = null
+  
   if (hasClerk) {
-    const authSession = await auth()
-    userId = authSession.userId
+    try {
+      const authSession = await auth()
+      userId = authSession.userId
+    } catch (authError) {
+      console.warn('[VOYRA] Clerk auth failed or session expired, proceeding as guest:', authError)
+    }
   }
 
   const body = await req.json()
@@ -168,7 +182,7 @@ export async function POST(req: NextRequest) {
     userContext,
   })
 
-  // Try primary model, fall back to llama3-70b-8192
+  // Try primary model, fall back to current stable fallback
   const tryModel = async (model: string) => {
     return groq.chat.completions.create({
       model,
@@ -183,7 +197,6 @@ export async function POST(req: NextRequest) {
       temperature: 0.65,
       top_p: 0.9,
       stream: true,
-      // NOTE: response_format is NOT used here — incompatible with stream:true on Groq
     })
   }
 
@@ -204,13 +217,14 @@ export async function POST(req: NextRequest) {
           for await (const chunk of stream) {
             const text = chunk.choices[0]?.delta?.content || ''
             if (text) controller.enqueue(encoder.encode(text))
-            // Capture actual model used from first chunk
             if (chunk.model) usedModel = chunk.model
           }
+        } catch (streamErr) {
+          console.error('[generate] Streaming error:', streamErr)
         } finally {
           controller.close()
         }
-        console.log(`[generate] Completed with model: ${usedModel}`)
+        console.log(`[generate] Completed with model: ${usedModel} ${userId ? `for user: ${userId}` : '(guest)'}`)
       },
     })
 
@@ -220,12 +234,14 @@ export async function POST(req: NextRequest) {
         'Transfer-Encoding': 'chunked',
         'X-AI-Provider': 'groq',
         'X-AI-Model': GROQ_MODEL,
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no', // Critical for streaming on Render/Nginx
       },
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     console.error('[VOYRA /api/generate] Fatal error:', message)
-    // Surface the actual Groq error to help diagnose model/quota issues
     return new Response(
       JSON.stringify({ error: 'AI generation failed', detail: message }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }
