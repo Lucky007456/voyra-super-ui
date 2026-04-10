@@ -140,12 +140,14 @@ OUTPUT: Respond ONLY with the JSON. No markdown fences. No explanation. Start di
 
 // ─── Route handler ────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
-  // Auth check — skip gracefully if Clerk not configured
+  // Auth check — we fetch userId to log usage or personalize if they are signed in.
+  // But we DO NOT block generation if they are unauthenticated (guests can try it free).
   const clerkKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
   const hasClerk = clerkKey && !clerkKey.startsWith('your_')
+  let userId = null
   if (hasClerk) {
-    const { userId } = await auth()
-    if (!userId) return new Response('Unauthorized', { status: 401 })
+    const authSession = await auth()
+    userId = authSession.userId
   }
 
   const body = await req.json()
